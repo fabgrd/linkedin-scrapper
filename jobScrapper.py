@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 
 try:
     from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
 except ImportError:  # pragma: no cover
     Workbook = None
 
@@ -177,12 +178,70 @@ def build_excel_bytes(dataframe):
 
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "offres"
+    sheet.title = "Offres LinkedIn"
 
+    headers = list(dataframe.columns)
+    sheet.append(headers)
     for row in dataframe.itertuples(index=False):
-        if sheet.max_row == 1 and sheet[1][0].value is None:
-            sheet.append(list(dataframe.columns))
         sheet.append(list(row))
+
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
+    light_blue = PatternFill(start_color="E7F3FF", end_color="E7F3FF", fill_type="solid")
+    light_green = PatternFill(start_color="E8F5E8", end_color="E8F5E8", fill_type="solid")
+    recent_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    old_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
+    for col_idx in range(1, sheet.max_column + 1):
+        cell = sheet.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    delay_col = headers.index("delai_publication") + 1 if "delai_publication" in headers else None
+    link_col = headers.index("lien") + 1 if "lien" in headers else None
+
+    for row_idx in range(2, sheet.max_row + 1):
+        base_fill = light_blue if row_idx % 2 == 0 else light_green
+
+        for col_idx in range(1, sheet.max_column + 1):
+            sheet.cell(row=row_idx, column=col_idx).fill = base_fill
+
+        if delay_col is not None:
+            delay_cell = sheet.cell(row=row_idx, column=delay_col)
+            delay_value = str(delay_cell.value or "").lower()
+            hours_match = re.search(r"(\d+)\s*heure", delay_value)
+
+            is_recent = "minute" in delay_value
+            if hours_match:
+                is_recent = int(hours_match.group(1)) <= 3
+
+            if is_recent:
+                delay_cell.fill = recent_fill
+            elif any(token in delay_value for token in ["jour", "semaine", "mois"]):
+                delay_cell.fill = old_fill
+
+        if link_col is not None:
+            link_cell = sheet.cell(row=row_idx, column=link_col)
+            link_value = str(link_cell.value or "").strip()
+            if link_value and link_value != "N/A":
+                link_cell.value = "*LIEN*"
+                link_cell.hyperlink = link_value
+                link_cell.font = Font(color="0000FF", underline="single")
+
+    width_map = {
+        "keyword": 24,
+        "ville_recherchee": 26,
+        "titre": 42,
+        "entreprise": 28,
+        "localisation": 24,
+        "date_publication": 14,
+        "delai_publication": 18,
+        "lien": 12,
+    }
+    for index, header in enumerate(headers, start=1):
+        width = width_map.get(header, 20)
+        sheet.column_dimensions[chr(64 + index)].width = width
 
     output = BytesIO()
     workbook.save(output)
@@ -190,45 +249,74 @@ def build_excel_bytes(dataframe):
     return output.getvalue()
 
 
-def parse_tag_input(raw_tags):
-    parsed = [item.strip() for item in raw_tags.split(",") if item.strip()]
-    unique = []
-    seen = set()
-    for item in parsed:
-        lowered = item.lower()
-        if lowered not in seen:
-            unique.append(item)
-            seen.add(lowered)
-    return unique
+def add_tag(state_key, value):
+    tag_value = value.strip()
+    if not tag_value:
+        return
+
+    existing = st.session_state.get(state_key, [])
+    existing_lowered = {item.lower() for item in existing}
+    if tag_value.lower() not in existing_lowered:
+        st.session_state[state_key].append(tag_value)
+
+
+def render_tags(state_key, prefix):
+    tags = st.session_state.get(state_key, [])
+    if not tags:
+        st.caption("Aucun tag pour le moment.")
+        return
+
+    st.caption("Tags:")
+    for index, tag in enumerate(list(tags)):
+        tag_col, remove_col = st.columns([6, 1])
+        tag_col.markdown(f"`{tag}`")
+        if remove_col.button("✕", key=f"remove_{prefix}_{index}", help=f"Supprimer {tag}"):
+            st.session_state[state_key].pop(index)
+            st.rerun()
+
+
+def ensure_tag_state():
+    if "cities_tags" not in st.session_state:
+        st.session_state["cities_tags"] = ["Paris, France", "Geneva, Switzerland"]
+    if "keywords_tags" not in st.session_state:
+        st.session_state["keywords_tags"] = list(DEFAULT_KEYWORDS)
 
 
 def run_app():
     st.set_page_config(page_title="Job Scrapper", page_icon="🔎", layout="wide")
     st.title("🔎 Job Scrapper LinkedIn (sans Selenium)")
     st.caption("Outil en ligne paramétrable : durée, pages, villes et keywords (tags).")
+    ensure_tag_state()
 
     with st.sidebar:
         st.subheader("Paramètres")
         duration = st.radio("Durée", options=["1 semaine", "1 jour"], horizontal=True, index=0)
         max_pages = st.number_input("Nombre de pages à scraper", min_value=1, max_value=20, value=2, step=1)
 
-        selected_cities = st.multiselect(
-            "Villes",
-            options=DEFAULT_CITIES,
-            default=["Paris, France", "Geneva, Switzerland"],
-        )
-        custom_city = st.text_input("Ajouter une ville", placeholder="Ex: Toulouse, France")
-        if custom_city and custom_city not in selected_cities:
-            selected_cities.append(custom_city)
+        st.markdown("### Villes (tags)")
+        quick_city = st.selectbox("Ajouter depuis la liste", options=["-"] + DEFAULT_CITIES, index=0)
+        if st.button("Ajouter ville", use_container_width=True):
+            if quick_city != "-":
+                add_tag("cities_tags", quick_city)
+                st.rerun()
 
-        default_kw_string = ", ".join(DEFAULT_KEYWORDS)
-        raw_tags = st.text_input(
-            "Keywords (tags, séparés par des virgules)",
-            value=default_kw_string,
-        )
-        keywords = parse_tag_input(raw_tags)
+        manual_city = st.text_input("Ajouter une ville personnalisée", placeholder="Ex: Toulouse, France")
+        if st.button("Ajouter ville personnalisée", use_container_width=True):
+            add_tag("cities_tags", manual_city)
+            st.rerun()
+        render_tags("cities_tags", "city")
+
+        st.markdown("### Keywords (tags)")
+        manual_keyword = st.text_input("Ajouter un keyword", placeholder="Ex: full stack developer")
+        if st.button("Ajouter keyword", use_container_width=True):
+            add_tag("keywords_tags", manual_keyword)
+            st.rerun()
+        render_tags("keywords_tags", "keyword")
 
         start_scrape = st.button("Lancer le scraping", type="primary", use_container_width=True)
+
+    selected_cities = st.session_state.get("cities_tags", [])
+    keywords = st.session_state.get("keywords_tags", [])
 
     st.info(
         "Ce scraper utilise la page publique LinkedIn Jobs (requests + BeautifulSoup). "
