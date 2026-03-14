@@ -341,16 +341,17 @@ def run_app():
         max_pages = st.number_input("Nombre de pages à scraper", min_value=1, max_value=20, value=2, step=1)
 
         st.markdown("### Villes (tags)")
-        quick_city = st.selectbox("Ajouter depuis la liste", options=["-"] + DEFAULT_CITIES, index=0)
+        city_to_add = st.selectbox(
+            "Ajouter une ville (liste ou personnalisée)",
+            options=DEFAULT_CITIES,
+            index=None,
+            placeholder="Choisis une ville ou écris-en une...",
+            accept_new_options=True,
+        )
         if st.button("Ajouter ville", use_container_width=True):
-            if quick_city != "-":
-                add_tag("cities_tags", quick_city)
+            if city_to_add:
+                add_tag("cities_tags", city_to_add)
                 st.rerun()
-
-        manual_city = st.text_input("Ajouter une ville personnalisée", placeholder="Ex: Toulouse, France")
-        if st.button("Ajouter ville personnalisée", use_container_width=True):
-            add_tag("cities_tags", manual_city)
-            st.rerun()
         render_tags("cities_tags", "city")
 
         st.markdown("### Keywords (tags)")
@@ -404,6 +405,7 @@ def run_app():
     dataframe["delai_minutes"] = dataframe["delai_publication"].apply(scraper.parse_delay_to_minutes)
     dataframe = dataframe.sort_values(by=["ville_recherchee", "delai_minutes"], ascending=[True, True])
     dataframe = dataframe.drop(columns=["delai_minutes"])
+    dataframe = dataframe.drop(columns=["keyword", "ville_recherchee"], errors="ignore")
 
     st.success(f"{len(dataframe)} offres trouvées (dédupliquées).")
     st.dataframe(dataframe, use_container_width=True, hide_index=True)
