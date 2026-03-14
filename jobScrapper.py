@@ -4,7 +4,7 @@ import re
 import time
 from datetime import datetime
 from io import BytesIO
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 import pandas as pd
 import requests
@@ -57,6 +57,42 @@ class LinkedInJobScraper:
             return True
         stars_ratio = text.count("*") / max(len(text), 1)
         return stars_ratio > 0.3
+
+    @staticmethod
+    def _normalize_text(value):
+        if value is None:
+            return ""
+        cleaned = re.sub(r"\s+", " ", str(value)).strip().lower()
+        return cleaned
+
+    @staticmethod
+    def _extract_linkedin_job_id(url):
+        if not url or url == "N/A":
+            return None
+
+        try:
+            match = re.search(r"/jobs/view/(\d+)", url)
+            if match:
+                return match.group(1)
+
+            parsed = urlparse(url)
+            query = parse_qs(parsed.query)
+            if "currentJobId" in query and query["currentJobId"]:
+                return query["currentJobId"][0]
+        except Exception:
+            return None
+
+        return None
+
+    @staticmethod
+    def _canonicalize_url(url):
+        if not url or url == "N/A":
+            return ""
+        try:
+            parsed = urlparse(url)
+            return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+        except Exception:
+            return str(url).strip()
 
     @staticmethod
     def parse_delay_to_minutes(delay_text):
@@ -165,7 +201,18 @@ class LinkedInJobScraper:
         seen = set()
         unique_jobs = []
         for job in jobs:
-            key = (job.get("titre"), job.get("entreprise"), job.get("localisation"), job.get("lien"))
+            job_id = LinkedInJobScraper._extract_linkedin_job_id(job.get("lien"))
+            if job_id:
+                key = ("job_id", job_id)
+            else:
+                key = (
+                    "fallback",
+                    LinkedInJobScraper._normalize_text(job.get("titre")),
+                    LinkedInJobScraper._normalize_text(job.get("entreprise")),
+                    LinkedInJobScraper._normalize_text(job.get("localisation")),
+                    LinkedInJobScraper._canonicalize_url(job.get("lien")),
+                )
+
             if key not in seen:
                 seen.add(key)
                 unique_jobs.append(job)
