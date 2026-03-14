@@ -324,9 +324,11 @@ def render_tags(state_key, prefix):
 
 def ensure_tag_state():
     if "cities_tags" not in st.session_state:
-        st.session_state["cities_tags"] = ["Paris, France", "Geneva, Switzerland"]
+        st.session_state["cities_tags"] = []
     if "keywords_tags" not in st.session_state:
-        st.session_state["keywords_tags"] = list(DEFAULT_KEYWORDS)
+        st.session_state["keywords_tags"] = []
+    if "results_df" not in st.session_state:
+        st.session_state["results_df"] = None
 
 
 def run_app():
@@ -337,8 +339,18 @@ def run_app():
 
     with st.sidebar:
         st.subheader("Paramètres")
-        duration = st.radio("Durée", options=["1 semaine", "1 jour"], horizontal=True, index=0)
-        max_pages = st.number_input("Nombre de pages à scraper", min_value=1, max_value=20, value=2, step=1)
+        duration = st.selectbox(
+            "Durée",
+            options=["1 semaine", "1 jour"],
+            index=None,
+            placeholder="Choisis une durée",
+        )
+        max_pages = st.selectbox(
+            "Nombre de pages à scraper",
+            options=list(range(1, 21)),
+            index=None,
+            placeholder="Choisis un nombre de pages",
+        )
 
         st.markdown("### Villes (tags)")
         city_to_add = st.selectbox(
@@ -371,44 +383,55 @@ def run_app():
         "Les résultats peuvent varier selon les limites anti-bot LinkedIn."
     )
 
-    if not start_scrape:
+    if start_scrape:
+        if duration is None:
+            st.error("Choisis une durée.")
+            st.stop()
+        if max_pages is None:
+            st.error("Choisis un nombre de pages.")
+            st.stop()
+        if not selected_cities:
+            st.error("Sélectionne au moins une ville.")
+            st.stop()
+        if not keywords:
+            st.error("Ajoute au moins un keyword/tag.")
+            st.stop()
+
+        scraper = LinkedInJobScraper()
+        all_jobs = []
+        total_searches = len(selected_cities) * len(keywords)
+        progress = st.progress(0.0)
+        status = st.empty()
+        current = 0
+
+        for city in selected_cities:
+            for keyword in keywords:
+                current += 1
+                status.write(f"Scraping `{keyword}` à `{city}` ({current}/{total_searches})...")
+                jobs = scraper.scrape_search(keyword=keyword, location=city, max_pages=max_pages, duration=duration)
+                all_jobs.extend(jobs)
+                progress.progress(current / total_searches)
+
+        clean_jobs = scraper.deduplicate_jobs(all_jobs)
+        if not clean_jobs:
+            st.session_state["results_df"] = None
+            st.warning("Aucune offre trouvée avec ces paramètres.")
+            st.stop()
+
+        dataframe = pd.DataFrame(clean_jobs)
+        dataframe["delai_minutes"] = dataframe["delai_publication"].apply(scraper.parse_delay_to_minutes)
+        dataframe = dataframe.sort_values(by=["ville_recherchee", "delai_minutes"], ascending=[True, True])
+        dataframe = dataframe.drop(columns=["delai_minutes"])
+        dataframe = dataframe.drop(columns=["keyword", "ville_recherchee"], errors="ignore")
+        st.session_state["results_df"] = dataframe
+
+    dataframe = st.session_state.get("results_df")
+    if dataframe is None:
+        st.caption("Lance un scraping pour afficher les résultats.")
         st.stop()
-
-    if not selected_cities:
-        st.error("Sélectionne au moins une ville.")
-        st.stop()
-    if not keywords:
-        st.error("Ajoute au moins un keyword/tag.")
-        st.stop()
-
-    scraper = LinkedInJobScraper()
-    all_jobs = []
-    total_searches = len(selected_cities) * len(keywords)
-    progress = st.progress(0.0)
-    status = st.empty()
-    current = 0
-
-    for city in selected_cities:
-        for keyword in keywords:
-            current += 1
-            status.write(f"Scraping `{keyword}` à `{city}` ({current}/{total_searches})...")
-            jobs = scraper.scrape_search(keyword=keyword, location=city, max_pages=max_pages, duration=duration)
-            all_jobs.extend(jobs)
-            progress.progress(current / total_searches)
-
-    clean_jobs = scraper.deduplicate_jobs(all_jobs)
-    if not clean_jobs:
-        st.warning("Aucune offre trouvée avec ces paramètres.")
-        st.stop()
-
-    dataframe = pd.DataFrame(clean_jobs)
-    dataframe["delai_minutes"] = dataframe["delai_publication"].apply(scraper.parse_delay_to_minutes)
-    dataframe = dataframe.sort_values(by=["ville_recherchee", "delai_minutes"], ascending=[True, True])
-    dataframe = dataframe.drop(columns=["delai_minutes"])
-    dataframe = dataframe.drop(columns=["keyword", "ville_recherchee"], errors="ignore")
 
     st.success(f"{len(dataframe)} offres trouvées (dédupliquées).")
-    st.dataframe(dataframe, use_container_width=True, hide_index=True)
+    st.dataframe(dataframe, use_container_width=True, hide_index=True, height=700)
 
     csv_bytes = dataframe.to_csv(index=False).encode("utf-8")
     excel_bytes = build_excel_bytes(dataframe)
